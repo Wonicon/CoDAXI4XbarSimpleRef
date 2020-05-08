@@ -3,7 +3,7 @@
 package cod
 
 import chisel3._
-import chisel3.util.{Arbiter, DecoupledIO, log2Ceil}
+import chisel3.util.{Arbiter, DecoupledIO, Queue, log2Ceil}
 import com.typesafe.scalalogging.Logger
 
 /**
@@ -42,34 +42,46 @@ class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with Has
 
   val outARArbs = Seq.fill(addressSpace.size) { Module(new Arbiter(new AXI4BundleA(AXI4Parameters.dataBits), m)) }
   val outAWArbs = Seq.fill(addressSpace.size) { Module(new Arbiter(new AXI4BundleA(AXI4Parameters.dataBits), m)) }
+  val outWBurst = RegInit(VecInit(Seq.fill(addressSpace.size) { false.B }))
+  val inRBurst = RegInit(VecInit(Seq.fill(addressSpace.size) { false.B }))
   val awDest = RegInit(VecInit(Seq.fill(m) { 0.U(log2Ceil(io.out.size)) }))
   val awDestValid = RegInit(VecInit(Seq.fill(m) { RegInit(false.B) }))
 
   // A Common Logic
   private def addressPortBinding(ins: Seq[DecoupledIO[AXI4BundleA]], outs: Seq[DecoupledIO[AXI4BundleA]],
                                  arbs: Seq[Arbiter[AXI4BundleA]], cmd: String): Seq[UInt] = {
-    val chosen = addressSpace.zipWithIndex map { case ((start, end), i) =>
-      val arb = arbs(i)
-      val out = outs(i)
+    val outstanding_guard = if (cmd == "aw") outWBurst else inRBurst
+    val ins_hits = ins.map { in =>
+      addressSpace.map { case (start, end) =>
+        start.U <= in.bits.addr && in.bits.addr < end.U
+      }
+    }
+    val chosen = addressSpace.zipWithIndex map { case ((start, end), out_idx) =>
+      val arb = arbs(out_idx)
+      val out = outs(out_idx)
+      val inflight = outstanding_guard(out_idx)
       // Bind each master with arbiter's input, masked by address range.
-      (arb.io.in zip ins).zipWithIndex foreach { case ((arb_in, in), i) =>
-        val addr_hit = start.U <= in.bits.addr && in.bits.addr < end.U
+      (arb.io.in zip ins).zipWithIndex foreach { case ((arb_in, in), in_idx) =>
+        val addr_hit = ins_hits(in_idx)(out_idx)
         arb_in <> in
-        arb_in.valid := in.valid && addr_hit
-        in.ready := arb_in.ready && addr_hit  // Arbiter will show ready to invalid producer!
+        arb_in.valid := in.valid && addr_hit && !inflight
       }
       out <> arb.io.out
       out.bits.id := (arb.io.out.bits.id << inIdBits).asUInt | arb.io.chosen
       when (out.fire()) {
         emulog(s"in[%d] $cmd routed to out[%d](%x,%x), id %x->%x",
-          arb.io.chosen, i.U, start.U, end.U, arb.io.out.bits.id, out.bits.id)
+          arb.io.chosen, out_idx.U, start.U, end.U, arb.io.out.bits.id, out.bits.id)
+        inflight := true.B
       }
 
       arb.io.chosen
     }
 
     for ((in, i) <- ins.zipWithIndex) {
-      in.ready := chosen.map(_ === i.U).reduce(_||_)
+      val hits = ins_hits(i)
+      in.ready := (chosen zip hits).zipWithIndex.map{ case ((choice, hit), o) =>
+        arbs(o).io.in(i).ready && choice === i.U && hit && !outstanding_guard(o)
+      }.reduce(_||_)
     }
 
     chosen
@@ -93,13 +105,16 @@ class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with Has
   io.in.map(_.w).zipWithIndex foreach { case (w, i) =>
     val dest = awDest(i)
     val destValid = awDestValid(i)
-    io.out(dest).w <> w
+    w.ready := false.B // init
+    when (destValid) {
+      io.out(dest).w <> w
+    }
     emulog { p => when (w.fire()) {
       p.emulog("w out port %d fired from in port %d", dest, i.U)
     }}
     when (w.fire() && w.bits.last) {
       destValid := false.B
-      emulog("w in port %d last finished\n", i.U)
+      emulog("w in port %d last finished", i.U)
     }
     assert(!w.valid || destValid, s"in port $i w.ch valid with no aw fired")
   }
@@ -109,10 +124,14 @@ class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with Has
   io.out.map(_.b).zipWithIndex foreach { case (b, i) =>
     val id = b.bits.id(inIdBits - 1, 0)
     val in_b = io.in(id).b
-    in_b <> b
-    in_b.bits.id := b.bits.id >> inIdBits
+    b.ready := false.B  // init
+    when (b.valid) {
+      in_b <> b
+      in_b.bits.id := b.bits.id >> inIdBits
+    }
     when (in_b.fire()) {
       emulog("out[%d] b routed to %d", i.U, id)
+      outWBurst(i) := false.B
     }
   }
 
@@ -124,10 +143,16 @@ class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with Has
   io.out.map(_.r).zipWithIndex foreach { case (r, i) =>
     val id = r.bits.id(inIdBits - 1, 0)
     val in_r = io.in(id).r
-    in_r <> r
+    r.ready := false.B // init
+    when (r.valid) {
+      in_r <> r
+    }
     in_r.bits.id := r.bits.id >> inIdBits
-    when(in_r.fire()) {
+    when (in_r.fire()) {
       emulog("r out port %d route to in port %d", i.U, id)
+    }
+    when (r.fire() && r.bits.last) {
+      inRBurst(i) := false.B
     }
   }
 }

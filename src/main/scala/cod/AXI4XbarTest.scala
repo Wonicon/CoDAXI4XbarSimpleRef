@@ -3,7 +3,6 @@ package cod
 import chisel3._
 import chisel3.util._
 import chisel3.iotesters._
-import org.scalatest.{Matchers, FlatSpec}
 
 
 class AXI4Master(addrs: Seq[Long], name: String, id: Int) extends Module with HasEmuLog {
@@ -117,7 +116,11 @@ class AXI4Client(name: String) extends Module with HasEmuLog {
 
   switch (state) {
     is (s_idle) {
-      state := s_ar
+      when (io.aw.valid) {
+        state := s_aw
+      }.elsewhen (io.ar.valid) {
+        state := s_ar
+      }
     }
 
     is (s_aw) {
@@ -145,7 +148,7 @@ class AXI4Client(name: String) extends Module with HasEmuLog {
       io.b.bits.id := id
       when (io.b.fire()) {
         emulog("bresp fired")
-        state := s_end
+        state := s_idle
       }
     }
 
@@ -166,7 +169,7 @@ class AXI4Client(name: String) extends Module with HasEmuLog {
         emulog("r fired %d", r_cnt)
         when (r_last) {
           emulog("r last")
-          state := s_end
+          state := s_idle
         }
       }
     }
@@ -177,18 +180,18 @@ class AXI4Client(name: String) extends Module with HasEmuLog {
 class Testharness extends Module {
   val io = IO(new Bundle {})
   val m1 = Module(new AXI4Master(List(0x100), "A", 33))
-  val m2 = Module(new AXI4Master(List(0x400), "B", 44))
+  val m2 = Module(new AXI4Master(List(0x100), "B", 44))
   val c1 = Module(new AXI4Client("C"))
   val c2 = Module(new AXI4Client("D"))
   val xbr = Module(new AXI4Xbar(2, List((0, 0x200), (0x300, 0x500))))
-  xbr.io.in(1) <> m1.io
-  xbr.io.in(0) <> m2.io
+  xbr.io.in(0) <> m1.io
+  xbr.io.in(1) <> m2.io
   c1.io <> xbr.io.out(0)
   c2.io <> xbr.io.out(1)
 }
 
 class AXI4XbarTester(c: Testharness) extends PeekPokeTester(c) {
-  for (i <- 0 to 100) {
+  for (i <- 0 to 18) {
     println("==================================")
     step(1)
   }

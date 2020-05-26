@@ -5,25 +5,34 @@ import chisel3.util._
 import chisel3.iotesters._
 
 
-class AXI4Master(addrs: Seq[Long], name: String, id: Int) extends Module with HasEmuLog {
-  val io = IO(new AXI4)
+class AXI4Master(name: String, id: Int, reqs: Seq[Req]) extends Module with HasEmuLog {
+  val io = IO(new Bundle {
+    val axi = new AXI4
+    val success = Output(Bool())
+  })
+
+  val axi = io.axi
 
   override def emulog_theme = "master_" + name
+
+  val addrs = reqs.map(_.address)
 
   val s_idle :: s_aw :: s_w :: s_bresp :: s_ar :: s_r :: s_end :: Nil = Enum(7)
   val state = RegInit(s_idle)
 
-  io.ar.valid := false.B
-  io.ar.bits := 0.U.asTypeOf(io.ar.bits)
-  io.r.ready := false.B
+  io.success := state === s_end
 
-  io.aw.valid := false.B
-  io.aw.bits := 0.U.asTypeOf(io.aw.bits)
-  io.w.valid := false.B
-  io.w.bits := 0.U.asTypeOf(io.w.bits)
-  io.b.ready := false.B
+  axi.ar.valid := false.B
+  axi.ar.bits := 0.U.asTypeOf(axi.ar.bits)
+  axi.r.ready := false.B
 
-  val (w_cnt, w_last) = Counter(state === s_w && io.w.fire(), 4)
+  axi.aw.valid := false.B
+  axi.aw.bits := 0.U.asTypeOf(axi.aw.bits)
+  axi.w.valid := false.B
+  axi.w.bits := 0.U.asTypeOf(axi.w.bits)
+  axi.b.ready := false.B
+
+  val (w_cnt, w_last) = Counter(axi.w.fire(), 1)
 
   when (state =/= s_idle) {
     emulog("state = %d", state)
@@ -31,55 +40,65 @@ class AXI4Master(addrs: Seq[Long], name: String, id: Int) extends Module with Ha
 
   switch (state) {
     is (s_idle) {
-      state := s_ar
+      state := s_aw
     }
 
     is (s_aw) {
-      io.aw.valid := true.B
-      io.aw.bits.addr := addrs(0).U
-      io.aw.bits.id := id.U
+      axi.aw.valid := true.B
+      axi.aw.bits.addr := addrs(0).U
+      axi.aw.bits.id := id.U
 
-      when (io.aw.fire()) {
+      when (axi.aw.fire()) {
         emulog("aw fired")
         state := s_w
+      }
+
+      axi.w.valid := true.B
+      axi.w.bits.last := w_last
+      when (axi.w.fire()) {
+        emulog("w fire cnt %d", w_cnt)
+      }
+      when (axi.w.fire() && w_last) {
+        emulog("w last")
+        state := s_bresp
       }
     }
 
     is (s_w) {
-      io.w.valid := true.B
-      io.w.bits.last := w_last
-      when (io.w.fire()) {
+      axi.w.valid := true.B
+      axi.w.bits.last := w_last
+      when (axi.w.fire()) {
         emulog("w fire cnt %d", w_cnt)
       }
-      when (io.w.fire() && w_last) {
+      when (axi.w.fire() && w_last) {
         emulog("w last")
         state := s_bresp
       }
     }
 
     is (s_bresp) {
-      io.b.ready := true.B
-      when (io.b.fire()) {
-        emulog("bresp fired, id %x", io.b.bits.id)
+      axi.b.ready := true.B
+      when (axi.b.fire()) {
+        emulog("bresp fired, id %x", axi.b.bits.id)
         state := s_end
       }
     }
 
     is (s_ar) {
-      io.ar.valid := true.B
-      io.ar.bits.addr := addrs(0).U
-      io.ar.bits.id := id.U
-      when (io.ar.fire()) {
+      axi.ar.valid := true.B
+      axi.ar.bits.addr := addrs(0).U
+      axi.ar.bits.id := id.U
+      when (axi.ar.fire()) {
         emulog("ar fired")
         state := s_r
       }
     }
 
     is (s_r) {
-      io.r.ready := true.B
-      when (io.r.fire()) {
-        emulog("r fired, id %x", io.r.bits.id)
-        when (io.r.bits.last) {
+      axi.r.ready := true.B
+      when (axi.r.fire()) {
+        emulog("r fired, id %x", axi.r.bits.id)
+        when (axi.r.bits.last) {
           emulog("r last")
           state := s_end
         }
@@ -112,7 +131,7 @@ class AXI4Client(name: String) extends Module with HasEmuLog {
     emulog("state = %d", state)
   }
 
-  val (r_cnt, r_last) = Counter(state === s_r && io.r.fire(), 4)
+  val (r_cnt, r_last) = Counter(io.r.fire(), 4)
 
   switch (state) {
     is (s_idle) {
@@ -129,6 +148,15 @@ class AXI4Client(name: String) extends Module with HasEmuLog {
         emulog("aw fired addr %x id %x", io.aw.bits.addr, io.aw.bits.id)
         id := io.aw.bits.id
         state := s_w
+      }
+
+      io.w.ready := true.B
+      when (io.w.fire()) {
+        emulog("w fired")
+        when (io.w.bits.last) {
+          emulog("w last")
+          state := s_bresp
+        }
       }
     }
 
@@ -176,29 +204,71 @@ class AXI4Client(name: String) extends Module with HasEmuLog {
   }
 }
 
+case class Req(rw: Int, address: BigInt, beats: Int)
+case class MasterParam(name: String, reqs: Req*)
 
-class Testharness extends Module {
-  val io = IO(new Bundle {})
-  val m1 = Module(new AXI4Master(List(0x100), "A", 33))
-  val m2 = Module(new AXI4Master(List(0x100), "B", 44))
-  val c1 = Module(new AXI4Client("C"))
-  val c2 = Module(new AXI4Client("D"))
-  val xbr = Module(new AXI4Xbar(2, List((0, 0x200), (0x300, 0x500))))
-  xbr.io.in(0) <> m1.io
-  xbr.io.in(1) <> m2.io
-  c1.io <> xbr.io.out(0)
-  c2.io <> xbr.io.out(1)
+class Testharness(masterPrams: Seq[MasterParam], addressSpaces: List[(Long, Long)]) extends Module {
+  val io = IO(new Bundle {
+    val success = Output(Bool())
+  })
+
+  val xbr = Module(new AXI4Xbar(masterPrams.size, addressSpaces))
+
+  val slaves = addressSpaces.zipWithIndex.map { case ((start, end), i) =>
+    Module(new AXI4Client(s"C${i+1}"))
+  }
+
+  val masters = masterPrams.zipWithIndex.map { case (master, i) =>
+    Module(new AXI4Master(master.name, i + 1, master.reqs))
+  }
+
+  for ((in, m) <- (xbr.io.in zip masters)) {
+    in <> m.io.axi
+  }
+
+  for ((out, s) <- (xbr.io.out zip slaves)) {
+    s.io <> out
+  }
+
+  io.success := masters.map(_.io.success).reduce(_&&_)
 }
 
 class AXI4XbarTester(c: Testharness) extends PeekPokeTester(c) {
-  for (i <- 0 to 18) {
+  var flag = true
+  var cycles = 1
+  while (flag && cycles < 1000) {
     println("==================================")
     step(1)
+    if (peek(c.io.success) == 1) {
+      println(s"Success in about ${cycles} cycles")
+      flag = false
+    }
+    cycles += 1
+  }
+  if (flag) {
+    println(s"Failed due to cycle expires (${cycles}), check xbar implementation or test scale")
+    fail
   }
 }
 
 object Test extends App {
-  chisel3.iotesters.Driver(() => new Testharness) { c =>
-    new AXI4XbarTester(c)
+  val addressSpaces = List((0x1000L, 0x2000L), (0x2000L, 0x3000L), (0x3000L, 0x4000L))
+  val R = 0
+  val W = 1
+  val masterSets = List(
+    List(
+      MasterParam("A", Req(W, 0x1100, 4), Req(W, 0x2100, 4), Req(W, 0x3100, 1)),
+      MasterParam("B", Req(W, 0x1200, 2), Req(W, 0x1300, 4), Req(W, 0x3100, 1))),
+    List(
+      MasterParam("A", Req(W, 0x1100, 4), Req(W, 0x2100, 4), Req(W, 0x3100, 1)),
+      MasterParam("B", Req(R, 0x1100, 2), Req(R, 0x2200, 4), Req(R, 0x3200, 1)))
+  )
+
+  masterSets foreach { masterSet =>
+    println(">>>>> test set start <<<<<<<")
+    chisel3.iotesters.Driver(() => new Testharness(masterSet, addressSpaces)) { c =>
+      new AXI4XbarTester(c)
+    }
+    println("<<<<< test set ended >>>>>>>")
   }
 }

@@ -1,21 +1,12 @@
-
-
 package cod
 
 import chisel3._
-import chisel3.util.{Arbiter, DecoupledIO, Queue, log2Ceil}
-import com.typesafe.scalalogging.Logger
+import chisel3.util._
 
 /**
  * Simple AXI4 Crossbar.
  * @param m Number of masters.
  * @param addressSpace Destination address spaces.
- *
- * TODO Auto-extensive id bits
- * TODO Id bits overflow checking
- * TODO Test multiple master hit cases
- * TODO Test async
- * TODO Inflight Control
  */
 class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with HasEmuLog {
   val io = IO(new Bundle {
@@ -44,6 +35,7 @@ class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with Has
   val outAWArbs = Seq.fill(addressSpace.size) { Module(new Arbiter(new AXI4BundleA(AXI4Parameters.dataBits), m)) }
   val outWBurst = RegInit(VecInit(Seq.fill(addressSpace.size) { false.B }))
   val inRBurst = RegInit(VecInit(Seq.fill(addressSpace.size) { false.B }))
+
   val awDest = RegInit(VecInit(Seq.fill(m) { 0.U(log2Ceil(io.out.size)) }))
   val awDestValid = RegInit(VecInit(Seq.fill(m) { RegInit(false.B) }))
 
@@ -64,7 +56,12 @@ class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with Has
       (arb.io.in zip ins).zipWithIndex foreach { case ((arb_in, in), in_idx) =>
         val addr_hit = ins_hits(in_idx)(out_idx)
         arb_in <> in
-        arb_in.valid := in.valid && addr_hit && !inflight
+        if (cmd == "aw") {
+          arb_in.valid := in.valid && addr_hit && !inflight
+        }
+        else {
+          arb_in.valid := in.valid && addr_hit && !inflight && !outAWArbs(out_idx).io.out.valid
+        }
       }
       out <> arb.io.out
       out.bits.id := (arb.io.out.bits.id << inIdBits).asUInt | arb.io.chosen
@@ -77,6 +74,7 @@ class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with Has
       arb.io.chosen
     }
 
+    // The requester can see the destination ready when it is chosen.
     for ((in, i) <- ins.zipWithIndex) {
       val hits = ins_hits(i)
       in.ready := (chosen zip hits).zipWithIndex.map{ case ((choice, hit), o) =>
@@ -102,21 +100,24 @@ class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with Has
 
   // Route W
   io.out.map(_.w).foreach(w => w <> 0.U.asTypeOf(w)) // Tell FIRRTL we have initialized in all addr cases.
-  io.in.map(_.w).zipWithIndex foreach { case (w, i) =>
-    val dest = awDest(i)
-    val destValid = awDestValid(i)
-    w.ready := false.B // init
-    when (destValid) {
-      io.out(dest).w <> w
+  for (i <- 0 until io.in.size) {
+    val iw = io.in(i).w
+    val iaw = io.in(i).aw
+    iw.ready := false.B
+
+    val oDestImm = MuxLookup(i.U, 0.U, outAWArbs.zipWithIndex.map{case(arb,j)=>(arb.io.chosen, j.U)})
+    val oDest = Mux(iaw.fire(), oDestImm, awDest(i))
+    val iwDestValid = awDestValid(i)
+    when (iaw.fire() || iwDestValid) {
+      io.out(oDest).w <> iw
     }
-    emulog { p => when (w.fire()) {
-      p.emulog("w out port %d fired from in port %d", dest, i.U)
-    }}
-    when (w.fire() && w.bits.last) {
-      destValid := false.B
+
+    emulog(iw.fire(), "w out port %d fired from in port %d", oDest, i.U)
+
+    when (iw.fire() && iw.bits.last) {
+      iwDestValid := false.B
       emulog("w in port %d last finished", i.U)
     }
-    assert(!w.valid || destValid, s"in port $i w.ch valid with no aw fired")
   }
 
   // Route B

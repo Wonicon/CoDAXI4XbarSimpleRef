@@ -25,7 +25,5 @@ trait HasEmuLog {
   /** Single log */
   def emulog(fmt: String, args: Bits*) = rawEmuLogger.log_raw(log_prefix, fmt, "\n", timer +: args:_*)
 
-  def emulog(log: RawEmuLogger => Unit) = {
-    log(rawEmuLogger)
-  }
+  def emulog(en: Bool, fmt: String, args: Bits*): Unit = when (en) { emulog(fmt, args:_*) }
 }

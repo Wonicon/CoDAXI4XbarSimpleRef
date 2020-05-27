@@ -15,8 +15,6 @@ class AXI4Master(name: String, id: Int, reqs: Seq[Req]) extends Module with HasE
 
   override def emulog_theme = "master_" + name
 
-  val addrs = reqs.map(_.address)
-
   val s_idle :: s_aw :: s_w :: s_bresp :: s_ar :: s_r :: s_end :: Nil = Enum(7)
   val state = RegInit(s_idle)
 
@@ -38,15 +36,26 @@ class AXI4Master(name: String, id: Int, reqs: Seq[Req]) extends Module with HasE
     emulog("state = %d", state)
   }
 
+  val addrs = reqs.map(_.address)
+  val req_no = Counter(reqs.size)
+  val req_rw = VecInit(reqs.map(_.rw.U))
+  val req_addr = VecInit(addrs.map(_.U))
+  val beats = VecInit(reqs.map(_.beats.U - 1.U))
+
   switch (state) {
     is (s_idle) {
-      state := s_aw
+      when (req_rw(req_no.value) === 0.U) {
+        state := s_ar
+      }.elsewhen (req_rw(req_no.value) === 1.U) {
+        state := s_aw
+      }
     }
 
     is (s_aw) {
       axi.aw.valid := true.B
-      axi.aw.bits.addr := addrs(0).U
+      axi.aw.bits.addr := req_addr(req_no.value)
       axi.aw.bits.id := id.U
+      axi.aw.bits.len := beats(req_no.value)
 
       when (axi.aw.fire()) {
         emulog("aw fired")
@@ -80,14 +89,20 @@ class AXI4Master(name: String, id: Int, reqs: Seq[Req]) extends Module with HasE
       axi.b.ready := true.B
       when (axi.b.fire()) {
         emulog("bresp fired, id %x", axi.b.bits.id)
-        state := s_end
+        req_no.inc()
+        when (req_no.value === (reqs.size - 1).U) {
+          state := s_end
+        }.otherwise {
+          state := s_idle
+        }
       }
     }
 
     is (s_ar) {
       axi.ar.valid := true.B
-      axi.ar.bits.addr := addrs(0).U
+      axi.ar.bits.addr := req_addr(req_no.value)
       axi.ar.bits.id := id.U
+      axi.ar.bits.len := beats(req_no.value)
       when (axi.ar.fire()) {
         emulog("ar fired")
         state := s_r
@@ -100,7 +115,12 @@ class AXI4Master(name: String, id: Int, reqs: Seq[Req]) extends Module with HasE
         emulog("r fired, id %x", axi.r.bits.id)
         when (axi.r.bits.last) {
           emulog("r last")
-          state := s_end
+          req_no.inc()
+          when (req_no.value === (reqs.size - 1).U) {
+            state := s_end
+          }.otherwise {
+            state := s_idle
+          }
         }
       }
     }
@@ -135,14 +155,13 @@ class AXI4Client(name: String) extends Module with HasEmuLog {
 
   switch (state) {
     is (s_idle) {
-      when (io.aw.valid) {
-        state := s_aw
-      }.elsewhen (io.ar.valid) {
-        state := s_ar
+      io.ar.ready := true.B
+      when (io.ar.fire()) {
+        emulog("ar fired, addr %x, id %x", io.ar.bits.addr, io.ar.bits.id)
+        id := io.ar.bits.id
+        state := s_r
       }
-    }
 
-    is (s_aw) {
       io.aw.ready := true.B
       when (io.aw.fire()) {
         emulog("aw fired addr %x id %x", io.aw.bits.addr, io.aw.bits.id)
@@ -177,15 +196,6 @@ class AXI4Client(name: String) extends Module with HasEmuLog {
       when (io.b.fire()) {
         emulog("bresp fired")
         state := s_idle
-      }
-    }
-
-    is (s_ar) {
-      io.ar.ready := true.B
-      when (io.ar.fire()) {
-        emulog("ar fired, addr %x, id %x", io.ar.bits.addr, io.ar.bits.id)
-        id := io.ar.bits.id
-        state := s_r
       }
     }
 

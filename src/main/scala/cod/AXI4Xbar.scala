@@ -77,8 +77,9 @@ class AXI4Xbar(m: Int, addressSpace: List[(Long, Long)]) extends Module with Has
     // The requester can see the destination ready when it is chosen.
     for ((in, i) <- ins.zipWithIndex) {
       val hits = ins_hits(i)
+      def rw_priority(o: Int) = if (cmd == "aw") true.B else !outAWArbs(o).io.out.valid
       in.ready := (chosen zip hits).zipWithIndex.map{ case ((choice, hit), o) =>
-        arbs(o).io.in(i).ready && choice === i.U && hit && !outstanding_guard(o)
+        rw_priority(o) && arbs(o).io.in(i).ready && choice === i.U && hit && !outstanding_guard(o)
       }.reduce(_||_)
     }
 

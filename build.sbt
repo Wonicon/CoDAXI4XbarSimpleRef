@@ -28,7 +28,7 @@ def javacOptionsVersion(scalaVersion: String): Seq[String] = {
 
 name := "ucas-cod-simplexbar"
 
-version := "3.2.0"
+version := "0.1.0"
 
 scalaVersion := "2.12.10"
 

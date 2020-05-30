@@ -189,7 +189,7 @@ module cpu_test_top (
     .axi_hp0_wlast  (axi_hp0_wlast  ),
     .axi_hp0_wready (axi_hp0_wready ),
     .axi_hp0_wstrb  (axi_hp0_wstrb  ),
-    .axi_hp0_wvalid (axi_hp0_wvalid ),
+    .axi_hp0_wvalid (axi_hp0_wvalid )
   );
 
 AXI4Xbar  u_AXI4Xbar(

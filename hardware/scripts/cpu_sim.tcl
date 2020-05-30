@@ -137,7 +137,7 @@ proc create_root_design { parentCell } {
 
   # Create interconnect
   set cpu_ddr_ic [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 cpu_ddr_ic ]
-  set_property -dict [list CONFIG.NUM_MI {1} CONFIG.NUM_SI {2}] $cpu_ddr_ic
+  set_property -dict [list CONFIG.NUM_MI {2} CONFIG.NUM_SI {1}] $cpu_ddr_ic
 
   # Create instance: Reset infrastructure for ARM and MIPS sub systems
   set zynq_reset_infra [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 zynq_reset_infra ]
@@ -227,7 +227,7 @@ proc create_root_design { parentCell } {
 			[get_bd_intf_pins axi_hp0]
 
   #connect_bd_intf_net -intf_net cpu_mem [get_bd_intf_pins cpu_ddr_ic/S01_AXI] \
-			[get_bd_intf_pins cpu_mem]
+#			[get_bd_intf_pins cpu_mem]
 
   connect_bd_intf_net -intf_net axi_uart [get_bd_intf_pins cpu_ddr_ic/M01_AXI] \
 			[get_bd_intf_pins axi_uart/S_AXI]
